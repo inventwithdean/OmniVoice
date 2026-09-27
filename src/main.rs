@@ -8,15 +8,18 @@ use burn_store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 
 mod config;
-mod tokenizer;
+mod duration;
+mod omnivoice;
 mod qwen3;
+mod tokenizer;
 
 use audioadapter::Adapter;
 use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler, audioadapter};
-use std::{error::Error, time::Instant, vec};
+use serde::Deserialize;
+use std::{error::Error, fs::File, io::BufReader, time::Instant, vec};
 
-use crate::tokenizer::model::HiggsAudioV2TokenizerModelConfig;
+use crate::omnivoice::OmniVoiceModelConfig;
 
 pub fn resample_audio(
     input: &[f32],
@@ -48,40 +51,57 @@ pub fn resample_audio(
     Ok(out_vec)
 }
 
-fn main() {
-    let device = Device::wgpu(Default::default());
-    let config = config::get_config();
-    println!("{}", serde_json::to_string_pretty(&serde_json::to_value(config).unwrap()).unwrap());
+#[derive(Deserialize)]
+struct InferenceArgs {
+    ref_audio_file: String,
+    ref_text: String,
+    target_text: String,
+    lang: Option<String>,
 }
 
-fn test_tokenizer(device: &Device) {
-    let model_config = tokenizer::config::get_config();
+fn main() {
+    let device = &Device::wgpu(Default::default());
+    let model_config = config::get_config();
+    let tokenizer_config = tokenizer::config::get_config();
 
-    let mut tokenizer = HiggsAudioV2TokenizerModelConfig::new().init(&model_config, device);
+    let mut omnivoice = OmniVoiceModelConfig::new().init(&model_config, &tokenizer_config, device);
 
-    println!("{:?}", tokenizer);
-
-    let mut store = SafetensorsStore::from_file("tokenizer.safetensors")
+    let mut tokenizer_store = SafetensorsStore::from_file("tokenizer.safetensors")
         .with_from_adapter(PyTorchToBurnAdapter);
 
-    let result = tokenizer.load_from(&mut store).unwrap();
+    let tokenizer_result = omnivoice
+        .audio_tokenizer
+        .load_from(&mut tokenizer_store)
+        .unwrap();
+    println!(
+        "Loaded tokenizer.safetensors: {} applied",
+        tokenizer_result.applied.len()
+    );
+
+    let mut store = SafetensorsStore::from_file("model.safetensors")
+        .with_from_adapter(PyTorchToBurnAdapter)
+        .allow_partial(true);
+
+    let result = omnivoice.load_from(&mut store).unwrap();
     println!("{}", result);
 
     println!("Applied: {} tensors", result.applied.len());
-    println!("Missing {:?}", result.missing);
     println!("Errors: {:?}", result.errors);
 
     if result.is_success() {
         println!("All tensors loaded successfully!");
     }
+    let args_file = File::open("args.json").expect("No args.json found!");
+    let reader = BufReader::new(args_file);
+    let args: InferenceArgs = serde_json::from_reader(reader).unwrap();
 
-    let mut reader = WavReader::open("test.wav").unwrap();
+    let mut reader = WavReader::open(args.ref_audio_file).unwrap();
     let spec = reader.spec();
     println!(
         "Loaded test.wav: {} Hz, {} channels, {} bits",
         spec.sample_rate, spec.channels, spec.bits_per_sample
     );
-    let num_channels = spec.channels as usize;
+    let mut num_channels = spec.channels as usize;
     let original_sample_rate = spec.sample_rate as usize;
 
     let samples: Vec<f32> = match spec.sample_format {
@@ -94,6 +114,12 @@ fn test_tokenizer(device: &Device) {
                 .collect()
         }
     };
+    let samples: Vec<f32> = if num_channels > 1 {
+        samples.iter().step_by(num_channels).copied().collect()
+    } else {
+        samples
+    };
+    num_channels = 1;
 
     let target_base_rate = 24000;
     let resampled = resample_audio(
@@ -117,15 +143,23 @@ fn test_tokenizer(device: &Device) {
         device,
     );
 
+    let ref_audio_waveform = input_tensor.squeeze_dim(1);
+
+    println!("Starting generation...");
     let timer = Instant::now();
-    let codes = tokenizer.encode(input_tensor);
 
-    println!("Tokens shape: {:?}", codes.shape());
+    let generated_waveform = omnivoice.generate_speech(
+        &args.target_text,
+        &args.ref_text,
+        ref_audio_waveform,
+        args.lang.as_deref(),
+        12,
+        3.0,
+    );
 
-    let reconstructed_tensor = tokenizer.decode(codes);
+    println!("Generation completed in: {:?}", timer.elapsed());
 
-    let recon_data = reconstructed_tensor.to_data();
-    println!("Total execution time: {:?}", timer.elapsed());
+    let recon_data = generated_waveform.to_data();
 
     let recon_slice = recon_data.as_slice::<f32>().unwrap();
 
@@ -136,17 +170,12 @@ fn test_tokenizer(device: &Device) {
         sample_format: SampleFormat::Float,
     };
 
-    let mut writer = WavWriter::create("reconstructed.wav", out_spec).unwrap();
+    let mut writer = WavWriter::create("output.wav", out_spec).unwrap();
 
-    let recon_frames = recon_slice.len() / num_channels;
-
-    for t in 0..recon_frames {
-        for c in 0..num_channels {
-            let sample = recon_slice[c * recon_frames + t];
-            writer.write_sample(sample).unwrap();
-        }
+    for &sample in recon_slice {
+        writer.write_sample(sample).unwrap();
     }
     writer.finalize().unwrap();
 
-    println!("Successfully saved reconstructed.wav!");
+    println!("Successfully saved output.wav!");
 }

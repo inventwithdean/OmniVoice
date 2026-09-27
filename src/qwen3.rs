@@ -3,7 +3,7 @@ use burn::{
     Tensor,
     config::Config,
     module::{Module, Param},
-    nn::{Embedding, Linear, LinearConfig},
+    nn::{Embedding, EmbeddingConfig, Linear, LinearConfig},
     tensor::{
         Bool, Device, FloatDType, Int,
         activation::{silu, softmax},
@@ -321,7 +321,7 @@ impl Qwen3DecoderLayerConfig {
 
 #[derive(Module, Debug)]
 pub struct Qwen3Model {
-    embed_tokens: Embedding,
+    pub embed_tokens: Embedding,
     layers: Vec<Qwen3DecoderLayer>,
     norm: Qwen3RMSNorm,
     rotary_emb: Qwen3RotaryEmbedding,
@@ -346,5 +346,23 @@ impl Qwen3Model {
         }
 
         self.norm.forward(hidden_states)
+    }
+}
+
+#[derive(Config, Debug)]
+pub struct Qwen3ModelConfig {}
+
+impl Qwen3ModelConfig {
+    pub fn init(&self, config: &LLMConfig, device: &Device) -> Qwen3Model {
+        let mut layers = vec![];
+        for _ in 0..config.num_hidden_layers {
+            layers.push(Qwen3DecoderLayerConfig::new().init(config, device));
+        }
+        Qwen3Model {
+            embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
+            layers,
+            norm: Qwen3RMSNormConfig::new(config.hidden_size, config.rms_norm_eps).init(device),
+            rotary_emb: Qwen3RotaryEmbeddingConfig::new().init(config, device),
+        }
     }
 }

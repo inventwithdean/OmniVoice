@@ -1,3 +1,6 @@
 /target
 /reference
 tokenizer.safetensors
+model.safetensors
+tokenizer.json
+/packaged
