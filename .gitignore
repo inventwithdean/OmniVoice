@@ -5,3 +5,4 @@ model.safetensors
 tokenizer.json
 /packaged
 omnivoice.mpk
+packaged.zip
