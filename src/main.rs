@@ -2,7 +2,12 @@
 
 use burn::{
     Tensor,
-    tensor::{Device, TensorData},
+    module::{Module, Quantizer},
+    store::ModuleRecord,
+    tensor::{
+        Device, TensorData,
+        quantization::{Calibration, QuantScheme, ScaleDtype},
+    },
 };
 use burn_store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
@@ -17,9 +22,9 @@ use audioadapter::Adapter;
 use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler, audioadapter};
 use serde::Deserialize;
-use std::{error::Error, fs::File, io::BufReader, time::Instant, vec};
+use std::{error::Error, fs::File, io::BufReader, path::Path, process::exit, time::Instant, vec};
 
-use crate::omnivoice::OmniVoiceModelConfig;
+use crate::omnivoice::{OmniVoiceModel, OmniVoiceModelConfig};
 
 pub fn resample_audio(
     input: &[f32],
@@ -66,31 +71,19 @@ fn main() {
 
     let mut omnivoice = OmniVoiceModelConfig::new().init(&model_config, &tokenizer_config, device);
 
-    let mut tokenizer_store = SafetensorsStore::from_file("tokenizer.safetensors")
-        .with_from_adapter(PyTorchToBurnAdapter);
+    let mpk_path = "omnivoice.mpk";
 
-    let tokenizer_result = omnivoice
-        .audio_tokenizer
-        .load_from(&mut tokenizer_store)
-        .unwrap();
-    println!(
-        "Loaded tokenizer.safetensors: {} applied",
-        tokenizer_result.applied.len()
-    );
-
-    let mut store = SafetensorsStore::from_file("model.safetensors")
-        .with_from_adapter(PyTorchToBurnAdapter)
-        .allow_partial(true);
-
-    let result = omnivoice.load_from(&mut store).unwrap();
-    println!("{}", result);
-
-    println!("Applied: {} tensors", result.applied.len());
-    println!("Errors: {:?}", result.errors);
-
-    if result.is_success() {
-        println!("All tensors loaded successfully!");
+    if Path::new(mpk_path).exists() {
+        println!("Loading {mpk_path}...");
+        let record = ModuleRecord::load(mpk_path).expect("Failed to load the MPK file");
+        omnivoice = omnivoice.load_record(record);
+    } else {
+        println!("No MPK found. Loading safetensors, quantizing and saving...");
+        convert_safetensors_to_mpk_save(omnivoice);
+        println!("Saved. Exiting now!");
+        exit(0);
     }
+
     let args_file = File::open("args.json").expect("No args.json found!");
     let reader = BufReader::new(args_file);
     let args: InferenceArgs = serde_json::from_reader(reader).unwrap();
@@ -178,4 +171,53 @@ fn main() {
     writer.finalize().unwrap();
 
     println!("Successfully saved output.wav!");
+}
+
+fn convert_safetensors_to_mpk_save(mut omnivoice: OmniVoiceModel) {
+    let mut tokenizer_store = SafetensorsStore::from_file("tokenizer.safetensors")
+        .with_from_adapter(PyTorchToBurnAdapter);
+
+    let tokenizer_result = omnivoice
+        .audio_tokenizer
+        .load_from(&mut tokenizer_store)
+        .unwrap();
+    println!(
+        "Loaded tokenizer.safetensors: {} applied",
+        tokenizer_result.applied.len()
+    );
+
+    let mut store = SafetensorsStore::from_file("model.safetensors")
+        .with_from_adapter(PyTorchToBurnAdapter)
+        .allow_partial(true);
+
+    let result = omnivoice.load_from(&mut store).unwrap();
+    println!("{}", result);
+
+    println!("Applied: {} tensors", result.applied.len());
+    println!("Errors: {:?}", result.errors);
+
+    if result.is_success() {
+        println!("All tensors loaded successfully!");
+    }
+
+    // Quantization
+    let mut quantizer = Quantizer::new(
+        Calibration::MinMax,
+        QuantScheme::default().per_tensor(ScaleDtype::F16),
+    );
+
+    // Quantize the transformers
+    omnivoice.audio_tokenizer.semantic_model.encoder = omnivoice
+        .audio_tokenizer
+        .semantic_model
+        .encoder
+        .quantize_weights(&mut quantizer);
+
+    omnivoice.llm = omnivoice.llm.quantize_weights(&mut quantizer);
+
+    let quantized_record = omnivoice.clone().into_record();
+
+    quantized_record
+        .save("omnivoice.mpk")
+        .expect("Failed to save model");
 }

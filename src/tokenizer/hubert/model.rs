@@ -13,7 +13,7 @@ use crate::tokenizer::hubert::{
 pub struct HubertModel {
     feature_extractor: Wav2Vec2FeatureEncoder,
     feature_projection: Wav2Vec2FeatureProjection,
-    encoder: Wav2Vec2Encoder,
+    pub encoder: Wav2Vec2Encoder,
 }
 
 impl HubertModel {

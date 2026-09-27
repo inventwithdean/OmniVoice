@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Module, Debug)]
 pub struct OmniVoiceModel {
-    llm: Qwen3Model,
+    pub llm: Qwen3Model,
     audio_embeddings: Embedding,
     codebook_layer_offsets: Tensor<1, Int>,
     audio_heads: Linear,

@@ -27,7 +27,7 @@ pub struct HiggsAudioV2TokenizerModel {
     acoustic_encoder: DacEncoder,
     acoustic_decoder: DacDecoder,
     encoder_semantic: SemanticEncoder,
-    semantic_model: HubertModel,
+    pub semantic_model: HubertModel,
     fc: Linear,
     // fc1: Linear<B>, // Used for training for HuBERT features reconstruction
     fc2: Linear,
