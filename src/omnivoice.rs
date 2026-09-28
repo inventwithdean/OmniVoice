@@ -115,8 +115,6 @@ impl OmniVoiceModel {
         let empty_text = Tensor::<2, Int>::zeros([b, 0], device);
 
         for step in 0..num_steps {
-            println!("Step: {step}");
-            // TODO: Batch both of these
             // Conditioned
             let cond_audio = Tensor::cat(vec![ref_audio_ids.clone(), target_audio.clone()], 2);
             let cond_logits = self.forward(text_ids.clone(), cond_audio, cond_mask.clone());
@@ -168,11 +166,18 @@ impl OmniVoiceModel {
             let total = c * t;
 
             let flat_scores = scores.reshape([b, total]); // (B, total)
+
             let flat_pred = pred.reshape([b, total]); // (B, total)
 
-            let topk_vals = flat_scores.clone().topk(k, 1); // (B, k)
+            // This is too slow.
+            // let topk_vals = flat_scores.clone().topk(k, 1); // (B, k)
+            // let threshold = topk_vals.clone().slice(s![.., (k - 1)..k]); // (B, 1)
 
-            let threshold = topk_vals.clone().slice(s![.., (k - 1)..k]); // (B, 1)
+            // This is fast. Works like a charm.
+            let sorted_scores = flat_scores.clone().sort_descending(1);
+
+            let threshold = sorted_scores.slice(s![.., (k - 1)..k]);
+
             let threshold = threshold.expand([b, total]); // (B, total)
 
             let mask = flat_scores.greater_equal(threshold); // (B, total) bool
@@ -216,21 +221,18 @@ impl OmniVoiceModel {
 
         Tensor::<2, Int>::from_data(TensorData::new(ids, [1, seq_len]), device)
     }
+
     pub fn generate_speech(
         &self,
         target_text: &str,
         ref_text: &str,
-        ref_audio_waveform: Tensor<2>,
+        ref_audio_ids: Tensor<3, Int>,
+        ref_duration: f32,
         lang: Option<&str>,
         num_steps: usize,
         cfg_scale: f32,
     ) -> Tensor<2> {
         let device = self.codebook_layer_offsets.device();
-
-        // ref_audio_waveform: (1, samples)
-        let num_samples = ref_audio_waveform.dims()[1];
-        // Hardcoding higgs sample rate
-        let ref_duration = num_samples as f32 / 24_000.0;
 
         let est_duration_seconds = self.duration_estimator.estimate_duration(
             target_text,
@@ -240,15 +242,10 @@ impl OmniVoiceModel {
             1.0,
         );
 
-        // Hardcoding higgs frame rate
         let target_seq_len = (est_duration_seconds * 25.0).round() as usize;
 
         let text_ids =
             self.prepare_inference_tokens(target_text, Some(ref_text), lang, None, &device);
-
-        let ref_audio_ids = self
-            .audio_tokenizer
-            .encode(ref_audio_waveform.unsqueeze_dim(1)); // (1, 8, ref_seq)
 
         let target_audio_ids = self.generate_iterative(
             text_ids,
@@ -259,6 +256,12 @@ impl OmniVoiceModel {
         );
 
         self.audio_tokenizer.decode(target_audio_ids).squeeze_dim(1) // (1, generated_samples)
+    }
+
+    // For caching
+    pub fn get_ref_audio_codes(&self, ref_audio_waveform: Tensor<2>) -> Tensor<3, Int> {
+        self.audio_tokenizer
+            .encode(ref_audio_waveform.unsqueeze_dim(1)) // (1, 8, ref_seq)
     }
 }
 

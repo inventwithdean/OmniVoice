@@ -1,6 +1,5 @@
 {
     "ref_audio_file": "emily.wav",
     "ref_text": "Hey buddy! Ready to make something interesting? Let's go!",
-    "target_text": "This is beyond awesome. This is so awesome!",
-    "lang": "en"
+    "lang": "hi"
 }

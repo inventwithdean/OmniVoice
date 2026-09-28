@@ -54,7 +54,7 @@ impl ScriptCategory {
 pub struct RuleDurationEstimator {}
 
 impl RuleDurationEstimator {
-    fn get_char_weight(char: char) -> ScriptCategory {
+    pub fn get_letter_category(char: char) -> ScriptCategory {
         match char {
             'A'..='Z' => ScriptCategory::Latin,
             ' ' => ScriptCategory::Space,
@@ -134,7 +134,7 @@ impl RuleDurationEstimator {
 
     pub fn calculate_total_weight(text: &str) -> f32 {
         text.chars()
-            .map(|c| Self::get_char_weight(c).weight())
+            .map(|c| Self::get_letter_category(c).weight())
             .sum()
     }
 
