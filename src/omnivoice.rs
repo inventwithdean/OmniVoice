@@ -306,6 +306,7 @@ impl OmniVoiceModelConfig {
         &self,
         config: &crate::config::OmniVoiceConfig,
         tokenizer_config: &crate::tokenizer::config::HiggsAudioV2TokenizerConfig,
+        text_tokenizer: Tokenizer,
         device: &Device,
     ) -> OmniVoiceModel {
         let mut normalized_audio_codebook_weights = vec![];
@@ -313,8 +314,7 @@ impl OmniVoiceModelConfig {
         for w in &config.audio_codebook_weights {
             normalized_audio_codebook_weights.push(*w as f64 / weights_sum);
         }
-        let text_tokenizer =
-            Tokenizer::from_file("./tokenizer.json").expect("Failed to load tokenizer.json");
+
         OmniVoiceModel {
             llm: Qwen3ModelConfig::new().init(&config.llm_config, device),
             audio_embeddings: EmbeddingConfig::new(
