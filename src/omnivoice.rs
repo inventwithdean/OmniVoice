@@ -16,8 +16,12 @@ use crate::{
 #[derive(Module, Debug)]
 pub struct OmniVoiceModel {
     pub llm: Qwen3Model,
+    // (num_codebooks * audio_vocab_size, hidden_size), i.e., (8200, 1024) (8 codebooks)
     audio_embeddings: Embedding,
+    // [0, 1025, 2050, 3075, 4100, 5125, 6150, 7175] as audio_vocab_size is 1025
+    // 7175 + 1025 is 8200, which matches our audio_embeddings
     codebook_layer_offsets: Tensor<1, Int>,
+    // (hidden_size, num_codebooks * audio_vocab_size), i.e., (1024, 8200)
     audio_heads: Linear,
     normalized_audio_codebook_weights: Vec<f64>,
     pub audio_tokenizer: HiggsAudioV2TokenizerModel,
@@ -28,6 +32,15 @@ pub struct OmniVoiceModel {
 }
 
 impl OmniVoiceModel {
+    /// text_ids: (B, text_seq)
+    /// 
+    /// audio_ids: (B, 8, audio_seq)
+    /// 
+    /// Outputs probabilities for all 1025 indices for all 8 codebooks, codebook major format
+    /// 
+    /// [[1025 * total_seq for codebook 1, 1025 * total_seq for codebook 2, ... 1025 * total_seq for codebook 8]]... batch times
+    /// 
+    /// Output: (B, 8, total_seq, 1025)
     pub fn forward(
         &self,
         text_ids: Tensor<2, Int>,
@@ -35,35 +48,45 @@ impl OmniVoiceModel {
         attention_mask: Tensor<4, Bool>,
     ) -> Tensor<4> {
         // text_ids: (B, T)
-        // audio_ids: (B, 8, audio_T)
-        let text_embeddings = self.llm.embed_tokens.forward(text_ids.clone()); // (B, T, C)
+        // audio_ids: (B, 8, audio_seq)
+        let text_embeddings = self.llm.embed_tokens.forward(text_ids.clone()); // (B, text_seq, 1024)
 
         let offsets = self.codebook_layer_offsets.clone().reshape([
             1,
             self.codebook_layer_offsets.dims()[0],
             1,
-        ]);
-        let shifted_audio_ids = audio_ids + offsets;
+        ]); // (1, 8, 1)
+        // (B, 8, audio_seq) + (1, 8, 1) = (B, 8, audio_seq)
+        // Essentially, so that the LLM's embeddings are different for every codebook.
+        // 1025 embeddings for every codebook. 
+        // Now codebook index 0 of first codebook will access 0th row of embedding table, 
+        // whereas codebook index 0 of second codebook will access 1025th row of the embedding table.
+        // Because last element of every codebook is mask token, element 1024, 2049, 3074, 4099, 5124, 6149, 7174, 8199 are all mask tokens
+        let shifted_audio_ids = audio_ids + offsets; // (B, 8, audio_seq)
         let [b, num_codebooks, audio_seq] = shifted_audio_ids.dims();
-        let flattended_ids = shifted_audio_ids.reshape([b * num_codebooks, audio_seq]);
-        let flat_embeds = self.audio_embeddings.forward(flattended_ids); // (B * num_codebooks, audio_seq, C)
-        let c = flat_embeds.dims()[2];
+        let flattened_ids = shifted_audio_ids.reshape([b * num_codebooks, audio_seq]); // (B * 8, audio_seq)
+        let flat_embeds = self.audio_embeddings.forward(flattened_ids); // (B * 8, audio_seq, C)
+        let c = flat_embeds.dims()[2]; // 1024
 
-        let audio_embeds = flat_embeds.reshape([b, num_codebooks, audio_seq, c]);
+        let audio_embeds = flat_embeds.reshape([b, num_codebooks, audio_seq, c]); // (B, 8, audio_seq, 1024)
 
-        let audio_embeds = audio_embeds.sum_dim(1).squeeze_dim(1); // (B, audio_seq, C)
-        let input_embeds = Tensor::cat(vec![text_embeddings, audio_embeds], 1); // (B, text_seq+audio+seq, C)
-        let total_seq = input_embeds.dims()[1];
-
+        // Summing across all codebooks
+        let audio_embeds = audio_embeds.sum_dim(1).squeeze_dim(1); // (B, audio_seq, 1024)
+        // Combine them together
+        let input_embeds = Tensor::cat(vec![text_embeddings, audio_embeds], 1); // (B, text_seq + audio_seq, 1024)
+        let total_seq = input_embeds.dims()[1]; // text_seq + audio_seq
+        
+        // [0, 1, 2, ... total_seq times] batch times
         let position_ids = Tensor::arange(0..total_seq as i64, &text_ids.device())
             .unsqueeze_dim::<2>(0)
             .expand([b, total_seq]); // (B, total_seq)
-
-        let hidden_states = self.llm.forward(position_ids, input_embeds, attention_mask);
-        let logits = self.audio_heads.forward(hidden_states); // (B, T, num_audio_codebooks * audio_vocab_size)
+        
+        let hidden_states = self.llm.forward(position_ids, input_embeds, attention_mask); // (B, total_seq, 1024)
+        let logits = self.audio_heads.forward(hidden_states); // (B, total_seq, num_audio_codebooks * audio_vocab_size)
         let audio_vocab_size = 1025;
+        // [[1025 probabilities for 1st codebook, 1025 probabilities for 2nd codebook...1025 probabilities for 8th codebook]...total_seq times]...batch times
         let logits = logits.reshape([b, total_seq, num_codebooks, audio_vocab_size]); // (B, total_seq, 8, 1025)
-
+        // [[1025 probabilities for 1st codebook, 1025 probabilities for 1st codebook...total_seq times], [1025 probabilities for 2nd codebook, 1025 probabilities for 2nd codebook...total_seq times]...8 times]...batch times
         logits.swap_dims(1, 2) // (B, 8, total_seq, 1025)
     }
 
@@ -80,7 +103,6 @@ impl OmniVoiceModel {
         let [_, num_codebooks, ref_seq] = ref_audio_ids.dims();
         let mask_id: i64 = 1024;
 
-        // Match OmniVoiceGenerationConfig defaults
         let t_shift = 0.1_f32;
         let layer_penalty_factor = 5.0_f32;
         let position_temperature = 5.0_f32;
@@ -92,7 +114,7 @@ impl OmniVoiceModel {
         let cond_mask = Tensor::<4>::ones([b, 1, cond_total, cond_total], device).bool();
         let uncond_mask = Tensor::<4>::ones([b, 1, target_seq_len, target_seq_len], device).bool();
 
-        // Schedule over the pooled (C * T) token budget, matching Python.
+        // Schedule over the pooled (C * T) token budget
         let total = target_seq_len * num_codebooks;
         let t_sched = get_time_steps(num_steps, t_shift);
         let mut schedule = vec![0usize; num_steps];
@@ -117,7 +139,7 @@ impl OmniVoiceModel {
         for step in 0..num_steps {
             // Conditioned
             let cond_audio = Tensor::cat(vec![ref_audio_ids.clone(), target_audio.clone()], 2);
-            let cond_logits = self.forward(text_ids.clone(), cond_audio, cond_mask.clone());
+            let cond_logits = self.forward(text_ids.clone(), cond_audio, cond_mask.clone()); // (B, 8, T, 1025)
             let start = text_seq + ref_seq;
             let c_logits = cond_logits.slice(s![.., .., start..cond_total, ..]);
 

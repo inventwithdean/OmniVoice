@@ -321,6 +321,7 @@ impl Qwen3DecoderLayerConfig {
 
 #[derive(Module, Debug)]
 pub struct Qwen3Model {
+    // Shape: (151676, 1024)
     pub embed_tokens: Embedding,
     layers: Vec<Qwen3DecoderLayer>,
     norm: Qwen3RMSNorm,
