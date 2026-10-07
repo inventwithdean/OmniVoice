@@ -33,13 +33,13 @@ pub struct OmniVoiceModel {
 
 impl OmniVoiceModel {
     /// text_ids: (B, text_seq)
-    /// 
+    ///
     /// audio_ids: (B, 8, audio_seq)
-    /// 
+    ///
     /// Outputs probabilities for all 1025 indices for all 8 codebooks, codebook major format
-    /// 
+    ///
     /// [[1025 * total_seq for codebook 1, 1025 * total_seq for codebook 2, ... 1025 * total_seq for codebook 8]]... batch times
-    /// 
+    ///
     /// Output: (B, 8, total_seq, 1025)
     pub fn forward(
         &self,
@@ -58,8 +58,8 @@ impl OmniVoiceModel {
         ]); // (1, 8, 1)
         // (B, 8, audio_seq) + (1, 8, 1) = (B, 8, audio_seq)
         // Essentially, so that the LLM's embeddings are different for every codebook.
-        // 1025 embeddings for every codebook. 
-        // Now codebook index 0 of first codebook will access 0th row of embedding table, 
+        // 1025 embeddings for every codebook.
+        // Now codebook index 0 of first codebook will access 0th row of embedding table,
         // whereas codebook index 0 of second codebook will access 1025th row of the embedding table.
         // Because last element of every codebook is mask token, element 1024, 2049, 3074, 4099, 5124, 6149, 7174, 8199 are all mask tokens
         let shifted_audio_ids = audio_ids + offsets; // (B, 8, audio_seq)
@@ -75,12 +75,12 @@ impl OmniVoiceModel {
         // Combine them together
         let input_embeds = Tensor::cat(vec![text_embeddings, audio_embeds], 1); // (B, text_seq + audio_seq, 1024)
         let total_seq = input_embeds.dims()[1]; // text_seq + audio_seq
-        
+
         // [0, 1, 2, ... total_seq times] batch times
         let position_ids = Tensor::arange(0..total_seq as i64, &text_ids.device())
             .unsqueeze_dim::<2>(0)
             .expand([b, total_seq]); // (B, total_seq)
-        
+
         let hidden_states = self.llm.forward(position_ids, input_embeds, attention_mask); // (B, total_seq, 1024)
         let logits = self.audio_heads.forward(hidden_states); // (B, total_seq, num_audio_codebooks * audio_vocab_size)
         let audio_vocab_size = 1025;

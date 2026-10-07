@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 audioadapter-buffers = "5.2.0"
-burn = { version = "~0.22.0-pre.4", features = ["std", "wgpu"], default-features = false }
-burn-store = "~0.22.0-pre.4"
+burn = { version = "0.22", features = ["std", "wgpu"], default-features = false }
+burn-store = "0.22"
 hf-hub = { version = "1.0.0", features = ["blocking"] }
 hound = "3.5.1"
 rodio = "0.22.2"
