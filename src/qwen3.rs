@@ -7,6 +7,8 @@ use burn::{
     tensor::{
         Bool, Device, FloatDType, Int,
         activation::{silu, softmax},
+        module::attention,
+        ops::AttentionModuleOptions,
         s,
     },
 };
@@ -213,6 +215,21 @@ impl Qwen3Attention {
         let key_states = repeat_kv(key_states, num_key_value_groups); // (B, 16, T, 128)
         let value_states = repeat_kv(value_states, num_key_value_groups); // (B, 16, T, 128)
 
+        // Flash attention
+        // Attention expects (B, num_heads, seq_len, head_dim)
+        let out = attention(
+            query_states,
+            key_states,
+            value_states,
+            Some(attention_mask.bool_not()),
+            None,
+            AttentionModuleOptions::default(),
+        ); // (B, 16, T, 128)
+        let out = out.swap_dims(1, 2); // (B, T, 16, 128)
+        let out = out.reshape([b, t, num_attention_heads * head_dim]); // (B, T, 2048)
+        return self.o_proj.forward(out);
+
+        // Vanilla attention path
         // (B, 16, T, 128) @ (B, 16, 128, T) => (B, 16, T, T)
         let attn_weights = query_states.matmul(key_states.transpose()) / (head_dim as f64).sqrt();
         let attn_weights = attn_weights.cast(FloatDType::F32); // cast up to f32
